@@ -1,0 +1,6 @@
+{
+  "name": "Travel Booking Document Hub",
+  "description": "Search, view, and analyze your travel reservations, including flight tickets, hotel bookings, car rentals, and activities stored in Google Drive or Google Photos.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
