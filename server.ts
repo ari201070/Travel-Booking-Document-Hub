@@ -84,12 +84,20 @@ async function generateContentWithRetry(options: any, maxRetries = 3, initialDel
         error.status === 'RESOURCE_EXHAUSTED' || 
         error.statusCode === 429 ||
         error.status === 429 ||
+        error.statusCode === 503 ||
+        error.status === 503 ||
+        error.status === 'UNAVAILABLE' ||
+        errorMessage.includes('503') ||
+        errorMessage.includes('high demand') ||
         errorMessage.includes('429') || 
         errorMessage.includes('RESOURCE_EXHAUSTED') || 
         errorMessage.includes('Quota exceeded') ||
         errorMessage.includes('rate-limits') ||
         errorString.includes('429') || 
-        errorString.includes('RESOURCE_EXHAUSTED');
+        errorString.includes('RESOURCE_EXHAUSTED') || 
+        errorString.includes('503') || 
+        errorString.includes('UNAVAILABLE') || 
+        errorString.includes('high demand');
 
       if (isRateLimit) {
         // If we hit a rate limit or daily quota on gemini-3.5-flash, automatically fallback to gemini-3.1-flash-lite
@@ -118,6 +126,7 @@ function formatGeminiError(error: any): { error: string, details: string, code?:
   const errorString = error?.message || String(error || '');
   let parsedMsg = errorString;
   let isQuotaExceeded = false;
+  let isHighDemand = false;
 
   try {
     if (errorString.startsWith('{') || errorString.includes('"error"')) {
@@ -133,6 +142,17 @@ function formatGeminiError(error: any): { error: string, details: string, code?:
 
   // Check common quota/rate limit indicators
   if (
+    error?.statusCode === 503 || 
+    error?.status === 503 || 
+    error?.status === 'UNAVAILABLE' || 
+    parsedMsg.includes('503') || 
+    parsedMsg.includes('high demand') || 
+    parsedMsg.includes('UNAVAILABLE')
+  ) {
+    isHighDemand = true;
+  }
+
+  if (
     error?.status === 'RESOURCE_EXHAUSTED' || 
     error?.statusCode === 429 || 
     error?.status === 429 ||
@@ -144,6 +164,14 @@ function formatGeminiError(error: any): { error: string, details: string, code?:
     parsedMsg.includes('rate-limits')
   ) {
     isQuotaExceeded = true;
+  }
+
+  if (isHighDemand) {
+    return {
+      error: "Servicio temporalmente saturado (503)",
+      details: "El servicio de inteligencia artificial está experimentando una alta demanda y está temporalmente saturado. Por favor, espera unos minutos e inténtalo de nuevo.",
+      code: "HIGH_DEMAND"
+    };
   }
 
   if (isQuotaExceeded) {
@@ -162,7 +190,7 @@ function formatGeminiError(error: any): { error: string, details: string, code?:
 }
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
@@ -183,6 +211,7 @@ app.post("/api/resolve-photo-link", async (req, res) => {
     
     // Fetch the link to resolve redirect and get the page HTML
     const response = await fetch(link, {
+      signal: AbortSignal.timeout(10000),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
       }
@@ -267,16 +296,19 @@ app.post("/api/analyze-doc", async (req, res) => {
         console.log(`Downloading Google Photo from URL: ${photoUrl}`);
         
         let downloadRes = await fetch(photoUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
         // Fallback for public googleusercontent URLs or if auth fails
         if (!downloadRes.ok) {
           console.log(`Retrying download of photo without Authorization header for URL: ${photoUrl}`);
-          downloadRes = await fetch(photoUrl);
+          downloadRes = await fetch(photoUrl, { signal: AbortSignal.timeout(15000) });
         }
 
         if (downloadRes.ok) {
+          const cl = downloadRes.headers.get('content-length');
+          if (cl && parseInt(cl, 10) > 20 * 1024 * 1024) throw new Error('File too large');
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
         } else {
@@ -290,6 +322,7 @@ app.post("/api/analyze-doc", async (req, res) => {
         }
         const exportUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMimeType)}`;
         const exportRes = await fetch(exportUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -302,10 +335,13 @@ app.post("/api/analyze-doc", async (req, res) => {
         // Standard files: download binary bytes
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
         const downloadRes = await fetch(downloadUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
         if (downloadRes.ok) {
+          const cl = downloadRes.headers.get('content-length');
+          if (cl && parseInt(cl, 10) > 20 * 1024 * 1024) throw new Error('File too large');
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
         } else {
@@ -393,7 +429,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Dirección física exacta (calle, número y ciudad), nombre del lugar, o ciudad si es genérico."
+              description: "¡MUY IMPORTANTE! Debes extraer la DIRECCIÓN FÍSICA EXACTA (Calle, número, ciudad, provincia, pais) si aparece en el ticket. Si no aparece, extrae el nombre del lugar y ciudad."
             },
             coordinates: {
               type: Type.OBJECT,
@@ -532,7 +568,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Dirección física exacta (calle, número y ciudad), nombre del lugar, o ciudad si es genérico."
+              description: "¡MUY IMPORTANTE! Debes extraer la DIRECCIÓN FÍSICA EXACTA (Calle, número, ciudad, provincia, pais) si aparece en el ticket. Si no aparece, extrae el nombre del lugar y ciudad."
             },
             coordinates: {
               type: Type.OBJECT,
