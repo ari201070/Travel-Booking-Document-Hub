@@ -393,7 +393,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Ubicación, ciudad, aeropuerto, o dirección física."
+              description: "Dirección física exacta (calle, número y ciudad), nombre del lugar, o ciudad si es genérico."
             },
             coordinates: {
               type: Type.OBJECT,
@@ -532,7 +532,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Ubicación, ciudad, aeropuerto, o dirección física."
+              description: "Dirección física exacta (calle, número y ciudad), nombre del lugar, o ciudad si es genérico."
             },
             coordinates: {
               type: Type.OBJECT,
