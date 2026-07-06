@@ -263,7 +263,11 @@ export default function App() {
         return [newBooking, ...filtered];
       });
 
-      showToast(`¡Documento clasificado como ${data.category || 'gasto'}!`, 'success');
+      if (isDoc) {
+        showToast(`¡Documento clasificado como ${data.category || 'gasto'}!`, 'success');
+      } else {
+        showToast('El archivo fue analizado pero no parece ser una reserva o gasto válido.', 'info');
+      }
 
     } catch (err: any) {
       console.error('Error analyzing document:', err);
@@ -351,7 +355,11 @@ export default function App() {
         return [newBooking, ...filtered];
       });
 
-      showToast(`¡Archivo "${name}" clasificado como ${data.category || 'gasto'}!`, 'success');
+      if (isDoc) {
+        showToast(`¡Archivo "${name}" clasificado como ${data.category || 'gasto'}!`, 'success');
+      } else {
+        showToast(`El archivo "${name}" fue analizado pero no parece ser válido.`, 'info');
+      }
 
     } catch (err: any) {
       console.error('Error analyzing local file:', err);
