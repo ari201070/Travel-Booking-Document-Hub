@@ -215,7 +215,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
 
     // Call Gemini with JSON Schema output and resilient retry mechanism
     const response = await generateContentWithRetry({
-      model: "gemini-2.5-flash",
+      process.env.GEMINI_MODEL || "gemini-2.5-flash",
       contents,
       config: {
         responseMimeType: "application/json",
@@ -401,7 +401,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
 
     // Call Gemini with JSON Schema output and resilient retry mechanism
     const response = await generateContentWithRetry({
-      model: "gemini-2.5-flash",
+      process.env.GEMINI_MODEL || "gemini-2.5-flash",
       contents,
       config: {
         responseMimeType: "application/json",
@@ -562,7 +562,7 @@ Por favor, utiliza esta lista para responder a las preguntas del usuario de form
 
     // Call Gemini with resilient retry mechanism
     const response = await generateContentWithRetry({
-      model: "gemini-2.5-flash",
+      process.env.GEMINI_MODEL || "gemini-2.5-flash",
       contents: contents,
       config: {
         systemInstruction: systemInstruction,

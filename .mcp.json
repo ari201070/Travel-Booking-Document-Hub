@@ -1,33 +1,21 @@
 {
   "mcpServers": {
-    "mcp-docs": {
-      "type": "http",
-      "url": "https://modelcontextprotocol.io/mcp"
-    },
-    "hub-viajes-filesystem": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "C:/Users/flier/GitHub/Travel-Booking-Document-Hub"
-      ]
-    },
     "reverse-geocoding-mcp": {
       "command": "node",
       "args": [
-        "C:/Users/flier/.gemini/antigravity/scratch/Reverse-Geocoding/mcp-server/index.js"
+        "C:\\Users\\flier\\.gemini\\antigravity\\scratch\\Reverse-Geocoding\\mcp-server\\index.js"
       ]
     },
     "photo-catalog": {
       "command": "node",
       "args": [
-        "C:/Users/flier/.gemini/antigravity/scratch/Reverse-Geocoding/mcp-photo-catalog/dist/index.js"
+        "C:\\Users\\flier\\.gemini\\antigravity\\scratch\\Reverse-Geocoding\\mcp-photo-catalog\\dist\\index.js"
       ]
     },
     "notebooklm-mcp": {
       "command": "node",
       "args": [
-        "C:/Users/flier/.gemini/antigravity/scratch/notebooklm-mcp/dist/index.js"
+        "C:\\Users\\flier\\.gemini\\antigravity\\scratch\\notebooklm-mcp\\dist\\index.js"
       ]
     }
   }

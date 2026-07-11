@@ -51,6 +51,8 @@ if (!apiKey) {
   console.log(`Loaded GEMINI_API_KEY: ${masked}`);
 }
 
+export const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
 export const ai = new GoogleGenAI({
   apiKey: apiKey || "",
   httpOptions: {

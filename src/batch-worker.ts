@@ -1,4 +1,4 @@
-import { generateContentWithRetry } from "./gemini.js";
+import { generateContentWithRetry, GEMINI_MODEL } from "./gemini.js";
 import { Type } from "@google/genai";
 import { getH3Index, checkLocationCache, updateSpatialCache } from "./spatial_cache.js";
 import { insertAnchor, generateAnchorId } from "./db.js";
@@ -94,7 +94,7 @@ async function analyzeSingleFile(file: BatchFile): Promise<BatchResult> {
     contents.push(prompt);
 
     const response = await generateContentWithRetry({
-      model: "gemini-2.5-flash",
+      process.env.GEMINI_MODEL || "gemini-2.5-flash",
       contents,
       config: { responseMimeType: "application/json", responseSchema },
     });
