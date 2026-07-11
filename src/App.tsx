@@ -249,7 +249,6 @@ export default function App() {
         endTime: data.endTime,
         confirmationNumber: data.confirmationNumber,
         location: data.location,
-        coordinates: data.coordinates,
         passengerOrGuestName: data.passengerOrGuestName,
         price: data.price,
         currency: data.currency,
@@ -264,11 +263,7 @@ export default function App() {
         return [newBooking, ...filtered];
       });
 
-      if (isDoc) {
-        showToast(`¡Documento clasificado como ${data.category || 'gasto'}!`, 'success');
-      } else {
-        showToast('El archivo fue analizado pero no parece ser una reserva o gasto válido.', 'info');
-      }
+      showToast(`¡Documento clasificado como ${data.category || 'gasto'}!`, 'success');
 
     } catch (err: any) {
       console.error('Error analyzing document:', err);
@@ -342,7 +337,6 @@ export default function App() {
         endTime: data.endTime,
         confirmationNumber: data.confirmationNumber,
         location: data.location,
-        coordinates: data.coordinates,
         passengerOrGuestName: data.passengerOrGuestName,
         price: data.price,
         currency: data.currency,
@@ -357,11 +351,7 @@ export default function App() {
         return [newBooking, ...filtered];
       });
 
-      if (isDoc) {
-        showToast(`¡Archivo "${name}" clasificado como ${data.category || 'gasto'}!`, 'success');
-      } else {
-        showToast(`El archivo "${name}" fue analizado pero no parece ser válido.`, 'info');
-      }
+      showToast(`¡Archivo "${name}" clasificado como ${data.category || 'gasto'}!`, 'success');
 
     } catch (err: any) {
       console.error('Error analyzing local file:', err);

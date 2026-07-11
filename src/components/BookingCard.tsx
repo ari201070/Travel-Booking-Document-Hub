@@ -229,7 +229,7 @@ export default function BookingCard({ booking, onReanalyze, isAnalyzing, trips, 
                   <span className="text-slate-800 font-medium">{booking.location}</span>
                 </div>
               </div>
-              {booking.coordinates && typeof booking.coordinates.lat === 'number' && typeof booking.coordinates.lng === 'number' && (
+              {booking.coordinates && (
                 <div className="flex items-start gap-2 ml-5">
                   <span className="text-slate-400 text-[10px] font-mono bg-slate-100 px-1.5 py-0.5 rounded border border-slate-200">
                     {booking.coordinates.lat.toFixed(6)}, {booking.coordinates.lng.toFixed(6)}
