@@ -84,6 +84,12 @@ export default function TravelChat({ bookings, trips }: TravelChatProps) {
       });
 
       if (!response.ok) {
+        try {
+          const errorData = await response.json();
+          if (errorData && errorData.error) {
+            throw new Error(errorData.error + (errorData.details ? ": " + errorData.details : ''));
+          }
+        } catch(e) {}
         throw new Error('No se pudo comunicar con el asistente de viaje');
       }
 
@@ -102,7 +108,7 @@ export default function TravelChat({ bookings, trips }: TravelChatProps) {
       const errorMsg: ChatMessage = {
         id: crypto.randomUUID(),
         role: 'model',
-        content: 'Disculpa, ocurrió un error al procesar tu solicitud. Por favor intenta de nuevo.',
+        content: err.message || 'Disculpa, ocurrió un error al procesar tu solicitud. Por favor intenta de nuevo.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       };
       setMessages(prev => [...prev, errorMsg]);

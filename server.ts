@@ -1,20 +1,196 @@
 import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
-import { Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import { exec } from "child_process";
-import { initDatabase, insertAnchor, generateAnchorId } from "./src/db.js";
-import { getH3Index, checkLocationCache, updateSpatialCache } from "./src/spatial_cache.js";
-import { generateContentWithRetry, formatGeminiError } from "./src/gemini.js";
-import { processBatch } from "./src/batch-worker.js";
+import fs from "fs";
 
 dotenv.config();
 
-const GEOCODE_API_URL = process.env.GEOCODE_API_URL || "http://localhost:3001/api/geocode";
+// Ensure Gemini API Key is present with robust fallbacks
+// We prioritize custom keys from .env or .env.example over process.env to allow user overrides
+let apiKey = "";
+
+function sanitizeKey(key: string): string {
+  if (!key) return "";
+  return key.trim().replace(/^["']|["']$/g, '').trim();
+}
+
+// 1. Check if .env file exists and has a valid custom key
+const envPath = path.join(process.cwd(), '.env');
+if (fs.existsSync(envPath)) {
+  try {
+    const envConfig = dotenv.parse(fs.readFileSync(envPath));
+    if (envConfig.GEMINI_API_KEY && envConfig.GEMINI_API_KEY !== "MY_GEMINI_API_KEY" && envConfig.GEMINI_API_KEY.trim() !== "") {
+      apiKey = sanitizeKey(envConfig.GEMINI_API_KEY);
+      process.env.GEMINI_API_KEY = apiKey;
+    }
+  } catch (err) {
+    console.error("Failed to parse .env:", err);
+  }
+}
+
+// 2. Check if .env.example exists and has a valid custom key
+if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+  const exampleEnvPath = path.join(process.cwd(), '.env.example');
+  if (fs.existsSync(exampleEnvPath)) {
+    try {
+      const exampleConfig = dotenv.parse(fs.readFileSync(exampleEnvPath));
+      if (exampleConfig.GEMINI_API_KEY && exampleConfig.GEMINI_API_KEY !== "MY_GEMINI_API_KEY" && exampleConfig.GEMINI_API_KEY.trim() !== "") {
+        apiKey = sanitizeKey(exampleConfig.GEMINI_API_KEY);
+        process.env.GEMINI_API_KEY = apiKey;
+        console.log("Successfully loaded fallback GEMINI_API_KEY from .env.example");
+      }
+    } catch (err) {
+      console.error("Failed to parse fallback .env.example:", err);
+    }
+  }
+}
+
+// 3. Fallback to pre-existing process.env.GEMINI_API_KEY
+if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+  apiKey = sanitizeKey(process.env.GEMINI_API_KEY || "");
+}
+
+if (!apiKey) {
+  console.warn("WARNING: GEMINI_API_KEY is not defined in environment variables. Gemini features will fail.");
+} else {
+  const maskedKey = apiKey.length > 8 ? `${apiKey.substring(0, 4)}...${apiKey.substring(apiKey.length - 4)}` : "SHORT_KEY";
+  console.log(`Successfully loaded and sanitized GEMINI_API_KEY: ${maskedKey}`);
+}
+
+// Initialize Gemini SDK with custom user agent telemetry
+const ai = new GoogleGenAI({
+  apiKey: apiKey || "",
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
+
+// Resilient helper to call Gemini with exponential backoff on 429/quota limits
+async function generateContentWithRetry(options: any, maxRetries = 3, initialDelayMs = 2500): Promise<any> {
+  let attempt = 0;
+  let hasFallenBack = false;
+  while (true) {
+    try {
+      return await ai.models.generateContent(options);
+    } catch (error: any) {
+      attempt++;
+      const errorString = JSON.stringify(error) || '';
+      const errorMessage = error.message || '';
+      const isRateLimit = 
+        error.status === 'RESOURCE_EXHAUSTED' || 
+        error.statusCode === 429 ||
+        error.status === 429 ||
+        error.statusCode === 503 ||
+        error.status === 503 ||
+        error.status === 'UNAVAILABLE' ||
+        errorMessage.includes('503') ||
+        errorMessage.includes('high demand') ||
+        errorMessage.includes('429') || 
+        errorMessage.includes('RESOURCE_EXHAUSTED') || 
+        errorMessage.includes('Quota exceeded') ||
+        errorMessage.includes('rate-limits') ||
+        errorString.includes('429') || 
+        errorString.includes('RESOURCE_EXHAUSTED') || 
+        errorString.includes('503') || 
+        errorString.includes('UNAVAILABLE') || 
+        errorString.includes('high demand');
+
+      if (isRateLimit) {
+        // If we hit a rate limit or daily quota on gemini-3.5-flash, automatically fallback to gemini-3.1-flash-lite
+        if (options.model === "gemini-3.5-flash" && !hasFallenBack) {
+          console.warn("[Gemini API] Quota/Rate limit exceeded on gemini-3.5-flash. Falling back to more generous gemini-3.1-flash-lite...");
+          options.model = "gemini-3.1-flash-lite";
+          hasFallenBack = true;
+          attempt = 0; // Reset attempts for the fallback model
+          continue;
+        }
+
+        if (attempt <= maxRetries) {
+          const delay = initialDelayMs * Math.pow(2.2, attempt - 1) + Math.random() * 1000;
+          console.warn(`[Gemini API] Rate limit or Quota exceeded detected on ${options.model}. Retrying attempt ${attempt}/${maxRetries} in ${Math.round(delay)}ms...`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+      }
+      throw error;
+    }
+  }
+}
+
+// Format Gemini API errors beautifully into user-facing localized Spanish message
+function formatGeminiError(error: any): { error: string, details: string, code?: string } {
+  const errorString = error?.message || String(error || '');
+  let parsedMsg = errorString;
+  let isQuotaExceeded = false;
+  let isHighDemand = false;
+
+  try {
+    if (errorString.startsWith('{') || errorString.includes('"error"')) {
+      const startIdx = errorString.indexOf('{');
+      const parsed = JSON.parse(errorString.substring(startIdx));
+      if (parsed.error && parsed.error.message) {
+        parsedMsg = parsed.error.message;
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Check common quota/rate limit indicators
+  if (
+    error?.statusCode === 503 || 
+    error?.status === 503 || 
+    error?.status === 'UNAVAILABLE' || 
+    parsedMsg.includes('503') || 
+    parsedMsg.includes('high demand') || 
+    parsedMsg.includes('UNAVAILABLE')
+  ) {
+    isHighDemand = true;
+  }
+
+  if (
+    error?.status === 'RESOURCE_EXHAUSTED' || 
+    error?.statusCode === 429 || 
+    error?.status === 429 ||
+    parsedMsg.includes('429') ||
+    parsedMsg.includes('quota') ||
+    parsedMsg.includes('Quota exceeded') ||
+    parsedMsg.includes('RESOURCE_EXHAUSTED') ||
+    parsedMsg.includes('limit') ||
+    parsedMsg.includes('rate-limits')
+  ) {
+    isQuotaExceeded = true;
+  }
+
+  if (isHighDemand) {
+    return {
+      error: "Servicio temporalmente saturado (503)",
+      details: "El servicio de inteligencia artificial está experimentando una alta demanda y está temporalmente saturado. Por favor, espera unos minutos e inténtalo de nuevo.",
+      code: "HIGH_DEMAND"
+    };
+  }
+
+  if (isQuotaExceeded) {
+    return {
+      error: "Límite de cuota de IA alcanzado (429)",
+      details: "Has alcanzado la cuota de consultas gratuitas de la API de Gemini (20 solicitudes diarias). Para continuar analizando documentos, por favor añade una clave API de Gemini en la configuración de la aplicación.",
+      code: "QUOTA_EXCEEDED"
+    };
+  }
+
+  return {
+    error: "Error en el análisis de documento",
+    details: parsedMsg || "Ocurrió un error inesperado al procesar el archivo con el modelo Gemini.",
+    code: "GENERIC_ERROR"
+  };
+}
 
 const app = express();
-app.use(express.json({ limit: '20mb' }));
+app.use(express.json({ limit: '50mb' }));
 
 const PORT = 3000;
 
@@ -35,6 +211,7 @@ app.post("/api/resolve-photo-link", async (req, res) => {
     
     // Fetch the link to resolve redirect and get the page HTML
     const response = await fetch(link, {
+      signal: AbortSignal.timeout(10000),
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
       }
@@ -119,16 +296,19 @@ app.post("/api/analyze-doc", async (req, res) => {
         console.log(`Downloading Google Photo from URL: ${photoUrl}`);
         
         let downloadRes = await fetch(photoUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
         // Fallback for public googleusercontent URLs or if auth fails
         if (!downloadRes.ok) {
           console.log(`Retrying download of photo without Authorization header for URL: ${photoUrl}`);
-          downloadRes = await fetch(photoUrl);
+          downloadRes = await fetch(photoUrl, { signal: AbortSignal.timeout(15000) });
         }
 
         if (downloadRes.ok) {
+          const cl = downloadRes.headers.get('content-length');
+          if (cl && parseInt(cl, 10) > 20 * 1024 * 1024) throw new Error('File too large');
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
         } else {
@@ -142,6 +322,7 @@ app.post("/api/analyze-doc", async (req, res) => {
         }
         const exportUrl = `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=${encodeURIComponent(exportMimeType)}`;
         const exportRes = await fetch(exportUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
@@ -154,10 +335,13 @@ app.post("/api/analyze-doc", async (req, res) => {
         // Standard files: download binary bytes
         const downloadUrl = `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`;
         const downloadRes = await fetch(downloadUrl, {
+          signal: AbortSignal.timeout(15000),
           headers: { Authorization: `Bearer ${token}` },
         });
 
         if (downloadRes.ok) {
+          const cl = downloadRes.headers.get('content-length');
+          if (cl && parseInt(cl, 10) > 20 * 1024 * 1024) throw new Error('File too large');
           const arrayBuffer = await downloadRes.arrayBuffer();
           fileBuffer = Buffer.from(arrayBuffer);
         } else {
@@ -172,36 +356,21 @@ app.post("/api/analyze-doc", async (req, res) => {
     // Build the parts for Gemini
     const contents: any[] = [];
     const mimeTypeForGemini = source === 'photos' ? 'image/jpeg' : mimeType;
-    let prompt = `Analiza visualmente este documento de forma exhaustiva. 
-- Si es una captura de pantalla de celular, ignora los elementos de la interfaz de la app o del sistema (batería, hora, notificaciones).
-- Si es una foto de un ticket físico (como un restaurante o lavadero), ignora arrugas, sombras o texto difuso de fondo.
-
-Soporte Multilingüe Universal: El pipeline de extracción debe ser capaz de procesar archivos en cualquier idioma (Español, Hebreo, Italiano, Esloveno, Chino, etc.). El set de caracteres de entrada se asume UTF-8 nativo. Sin importar el idioma, debes mapear semánticamente los conceptos clave a las categorías predefinidas. Por ejemplo, si detectas términos equivalentes a 'bus', 'colectivo', 'autobús', 'tren', 'subway' o caracteres eslavos/asiáticos de transporte, clasifícalos correctamente como 'TRANSPORT'. Si detectas facturas, tickets de compra, supermercado o comida, clasifícalos como 'SHOPPING_RECEIPTS'.
-
-Determina si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (lavandería, supermercados, peajes, restaurantes, compras generales, etc.). Absolutamente cualquier ticket de compra se considera un gasto válido.
-
-La propiedad \`location\` debe ser una cadena limpia con la estructura estándar de mapas abiertos para optimizar la geocodificación local FOSS: '[Nombre del Comercio/Hito], [Ciudad], [País]' (ej: 'Concorde Hotel, Bariloche, Argentina' o 'Urbia Cataratas, Foz do Iguacu, Brasil'). No utilices ninguna referencia a Google Maps en tu formato.
-
+    let prompt = `Analiza este documento para determinar si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (incluyendo facturas de lavandería, supermercados, tiendas, peajes, restaurantes, compras generales, etc), y extrae toda la información estructurada relevante. Absolutamente cualquier ticket o recibo de compra se considera un gasto de viaje.
 Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
 
     if (fileBuffer) {
-      if (mimeTypeForGemini === 'application/pdf') {
-        const { PDFParse } = await import("pdf-parse");
-        const parser = new PDFParse({ data: fileBuffer });
-        await (parser as any).load();
-        const pdfData = await parser.getText();
-        const text = pdfData.text.slice(0, 15000);
-        parser.destroy();
-        prompt += `\nContenido extraído del PDF:\n${text}`;
-      } else if (['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(mimeTypeForGemini)) {
+      const supportedBinaryTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+      if (supportedBinaryTypes.includes(mimeTypeForGemini)) {
         contents.push({
           inlineData: {
             mimeType: mimeTypeForGemini,
             data: fileBuffer.toString('base64'),
           }
         });
-        prompt += `\nLa imagen está adjunta. Analiza su contenido visual.`;
+        prompt += `\nEl archivo binario está adjunto. Analiza el contenido visual o texto embebido de este archivo para extraer todos los detalles.`;
       } else {
+        // Raw text file or other downloadable text format
         const textContent = fileBuffer.toString('utf-8').slice(0, 12000);
         prompt += `\nContenido de texto extraído del archivo original:\n${textContent}`;
       }
@@ -215,7 +384,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
 
     // Call Gemini with JSON Schema output and resilient retry mechanism
     const response = await generateContentWithRetry({
-      process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents,
       config: {
         responseMimeType: "application/json",
@@ -228,7 +397,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
             },
             category: {
               type: Type.STRING,
-              description: "Debe ser uno de: 'HOTEL', 'FLIGHT', 'CAR_RENTAL', 'TRANSPORT', 'ACTIVITY', 'SHOPPING_RECEIPTS'."
+              description: "Debe ser uno de: 'hotel', 'flight', 'car_rental', 'activity', 'purchase', 'other_travel'"
             },
             supplier: {
               type: Type.STRING,
@@ -260,11 +429,21 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Ubicación limpia en formato estándar de mapas abiertos para optimizar geocodificación FOSS local: '[Nombre del Comercio/Hito], [Ciudad], [País]'. Sin referencias a Google Maps."
+              description: "¡MUY IMPORTANTE! Debes extraer la DIRECCIÓN FÍSICA EXACTA (Calle, número, ciudad, provincia, pais) si aparece en el ticket. Si no aparece, extrae el nombre del lugar y ciudad."
             },
-            extraction_notes: {
-              type: Type.STRING,
-              description: "Razonamiento breve sobre cómo se extrajo la información o si hubo dudas en la lectura."
+            coordinates: {
+              type: Type.OBJECT,
+              description: "¡MUY IMPORTANTE! Coordenadas geográficas exactas del lugar. Si es un restaurante, tienda o factura sin dirección, DEBES inferir y devolver latitud y longitud basándote en tu conocimiento general.",
+              properties: {
+                lat: {
+                  type: Type.NUMBER,
+                  description: "Latitud decimal."
+                },
+                lng: {
+                  type: Type.NUMBER,
+                  description: "Longitud decimal."
+                }
+              }
             },
             passengerOrGuestName: {
               type: Type.STRING,
@@ -287,7 +466,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
               description: "Un resumen breve y profesional de 1 o 2 oraciones en español del documento de viaje."
             }
           },
-          required: ["extraction_notes", "isTravelDocument"]
+          required: ["isTravelDocument"]
         }
       }
     });
@@ -298,46 +477,6 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
     }
 
     const parsedResult = JSON.parse(resultText.trim());
-
-    if (parsedResult.location) {
-      try {
-        const cached = checkLocationCache(parsedResult.location);
-        if (cached) {
-          parsedResult.coordinates = { lat: cached.latitude, lng: cached.longitude };
-        } else {
-          const geoResponse = await fetch(`${GEOCODE_API_URL}?address=${encodeURIComponent(parsedResult.location)}`);
-          if (geoResponse.ok) {
-            const geoData = await geoResponse.json();
-            if (geoData.lat && geoData.lng) {
-              const lat = parseFloat(Number(geoData.lat).toFixed(4));
-              const lng = parseFloat(Number(geoData.lng).toFixed(4));
-              parsedResult.coordinates = { lat, lng };
-              const h3 = getH3Index(lat, lng);
-              parsedResult.h3_index = h3;
-              updateSpatialCache(h3, parsedResult.location, lat, lng);
-            }
-          }
-        }
-      } catch (geoError: any) {
-        console.warn("[Geocoding] Servicio local /api/analyze-doc no disponible:", geoError.message);
-      }
-    }
-
-    try {
-      const anchorId = generateAnchorId(name);
-      insertAnchor({
-        id: anchorId,
-        location: parsedResult.location,
-        latitude: parsedResult.coordinates?.lat,
-        longitude: parsedResult.coordinates?.lng,
-        is_travel_document: parsedResult.isTravelDocument,
-        h3_index: parsedResult.h3_index,
-        raw_json: JSON.stringify(parsedResult),
-      });
-    } catch (dbErr: any) {
-      console.warn("[DB] Error registrando anchor en /api/analyze-doc:", dbErr.message);
-    }
-
     return res.json(parsedResult);
 
   } catch (error: any) {
@@ -358,35 +497,18 @@ app.post("/api/analyze-local", async (req, res) => {
     console.log(`Analyzing local file: "${name}" (${mimeType})`);
 
     const contents: any[] = [];
-    let prompt = `Analiza visualmente este documento de forma exhaustiva. 
-- Si es una captura de pantalla de celular, ignora los elementos de la interfaz de la app o del sistema (batería, hora, notificaciones).
-- Si es una foto de un ticket físico (como un restaurante o lavadero), ignora arrugas, sombras o texto difuso de fondo.
-
-Soporte Multilingüe Universal: El pipeline de extracción debe ser capaz de procesar archivos en cualquier idioma (Español, Hebreo, Italiano, Esloveno, Chino, etc.). El set de caracteres de entrada se asume UTF-8 nativo. Sin importar el idioma, debes mapear semánticamente los conceptos clave a las categorías predefinidas. Por ejemplo, si detectas términos equivalentes a 'bus', 'colectivo', 'autobús', 'tren', 'subway' o caracteres eslavos/asiáticos de transporte, clasifícalos correctamente como 'TRANSPORT'. Si detectas facturas, tickets de compra, supermercado o comida, clasifícalos como 'SHOPPING_RECEIPTS'.
-
-Determina si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (lavandería, supermercados, peajes, restaurantes, compras generales, etc.). Absolutamente cualquier ticket de compra se considera un gasto válido.
-
-La propiedad \`location\` debe ser una cadena limpia con la estructura estándar de mapas abiertos para optimizar la geocodificación local FOSS: '[Nombre del Comercio/Hito], [Ciudad], [País]' (ej: 'Concorde Hotel, Bariloche, Argentina' o 'Urbia Cataratas, Foz do Iguacu, Brasil'). No utilices ninguna referencia a Google Maps en tu formato.
-
+    let prompt = `Analiza este documento para determinar si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (incluyendo facturas de lavandería, supermercados, tiendas, peajes, restaurantes, compras generales, etc), y extrae toda la información estructurada relevante. Absolutamente cualquier ticket o recibo de compra se considera un gasto de viaje.
 Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
 
-    if (mimeType === 'application/pdf') {
-      const { PDFParse } = await import("pdf-parse");
-      const buf = Buffer.from(base64Data, 'base64');
-      const parser = new PDFParse({ data: buf });
-      await (parser as any).load();
-      const pdfData = await parser.getText();
-      const text = pdfData.text.slice(0, 15000);
-      parser.destroy();
-      prompt += `\nContenido extraído del PDF:\n${text}`;
-    } else if (['image/png', 'image/jpeg', 'image/jpg', 'image/webp'].includes(mimeType)) {
+    const supportedBinaryTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    if (supportedBinaryTypes.includes(mimeType)) {
       contents.push({
         inlineData: {
           mimeType: mimeType,
           data: base64Data,
         }
       });
-      prompt += `\nLa imagen está adjunta. Analiza su contenido visual.`;
+      prompt += `\nEl archivo binario está adjunto. Analiza el contenido visual o texto embebido de este archivo para extraer todos los detalles.`;
     } else {
       // Decode base64 to text string
       try {
@@ -401,7 +523,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
 
     // Call Gemini with JSON Schema output and resilient retry mechanism
     const response = await generateContentWithRetry({
-      process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents,
       config: {
         responseMimeType: "application/json",
@@ -414,7 +536,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
             },
             category: {
               type: Type.STRING,
-              description: "Debe ser uno de: 'HOTEL', 'FLIGHT', 'CAR_RENTAL', 'TRANSPORT', 'ACTIVITY', 'SHOPPING_RECEIPTS'."
+              description: "Debe ser uno de: 'hotel', 'flight', 'car_rental', 'activity', 'purchase', 'other_travel'"
             },
             supplier: {
               type: Type.STRING,
@@ -446,11 +568,21 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
             },
             location: {
               type: Type.STRING,
-              description: "Ubicación limpia en formato estándar de mapas abiertos para optimizar geocodificación FOSS local: '[Nombre del Comercio/Hito], [Ciudad], [País]'. Sin referencias a Google Maps."
+              description: "¡MUY IMPORTANTE! Debes extraer la DIRECCIÓN FÍSICA EXACTA (Calle, número, ciudad, provincia, pais) si aparece en el ticket. Si no aparece, extrae el nombre del lugar y ciudad."
             },
-            extraction_notes: {
-              type: Type.STRING,
-              description: "Razonamiento breve sobre cómo se extrajo la información o si hubo dudas en la lectura."
+            coordinates: {
+              type: Type.OBJECT,
+              description: "¡MUY IMPORTANTE! Coordenadas geográficas exactas del lugar. Si es un restaurante, tienda o factura sin dirección, DEBES inferir y devolver latitud y longitud basándote en tu conocimiento general.",
+              properties: {
+                lat: {
+                  type: Type.NUMBER,
+                  description: "Latitud decimal."
+                },
+                lng: {
+                  type: Type.NUMBER,
+                  description: "Longitud decimal."
+                }
+              }
             },
             passengerOrGuestName: {
               type: Type.STRING,
@@ -473,7 +605,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
               description: "Un resumen breve y profesional de 1 o 2 oraciones en español del documento de viaje."
             }
           },
-          required: ["extraction_notes", "isTravelDocument"]
+          required: ["isTravelDocument"]
         }
       }
     });
@@ -484,46 +616,6 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
     }
 
     const parsedResult = JSON.parse(resultText.trim());
-
-    if (parsedResult.location) {
-      try {
-        const cached = checkLocationCache(parsedResult.location);
-        if (cached) {
-          parsedResult.coordinates = { lat: cached.latitude, lng: cached.longitude };
-        } else {
-          const geoResponse = await fetch(`${GEOCODE_API_URL}?address=${encodeURIComponent(parsedResult.location)}`);
-          if (geoResponse.ok) {
-            const geoData = await geoResponse.json();
-            if (geoData.lat && geoData.lng) {
-              const lat = parseFloat(Number(geoData.lat).toFixed(4));
-              const lng = parseFloat(Number(geoData.lng).toFixed(4));
-              parsedResult.coordinates = { lat, lng };
-              const h3 = getH3Index(lat, lng);
-              parsedResult.h3_index = h3;
-              updateSpatialCache(h3, parsedResult.location, lat, lng);
-            }
-          }
-        }
-      } catch (geoError: any) {
-        console.warn("[Geocoding] Servicio local /api/analyze-local no disponible:", geoError.message);
-      }
-    }
-
-    try {
-      const anchorId = generateAnchorId(name);
-      insertAnchor({
-        id: anchorId,
-        location: parsedResult.location,
-        latitude: parsedResult.coordinates?.lat,
-        longitude: parsedResult.coordinates?.lng,
-        is_travel_document: parsedResult.isTravelDocument,
-        h3_index: parsedResult.h3_index,
-        raw_json: JSON.stringify(parsedResult),
-      });
-    } catch (dbErr: any) {
-      console.warn("[DB] Error registrando anchor en /api/analyze-local:", dbErr.message);
-    }
-
     return res.json(parsedResult);
 
   } catch (error: any) {
@@ -562,7 +654,7 @@ Por favor, utiliza esta lista para responder a las preguntas del usuario de form
 
     // Call Gemini with resilient retry mechanism
     const response = await generateContentWithRetry({
-      process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: contents,
       config: {
         systemInstruction: systemInstruction,
@@ -579,38 +671,8 @@ Por favor, utiliza esta lista para responder a las preguntas del usuario de form
   }
 });
 
-// Batch analyze endpoint
-app.post("/api/batch-analyze", async (req, res) => {
-  try {
-    const { files, concurrency } = req.body;
-    if (!files || !Array.isArray(files) || files.length === 0) {
-      return res.status(400).json({ error: "Missing or empty 'files' array" });
-    }
-
-    console.log(`[Batch] Iniciando lote de ${files.length} documentos (concurrencia: ${concurrency || 2})`);
-
-    // Process the batch
-    const result = await processBatch(files, concurrency || 2);
-
-    const totalTravelDocs = result.results.filter((r) => r.success && r.isTravelDocument).length;
-
-    return res.json({
-      total: result.total,
-      succeeded: result.succeeded,
-      failed: result.failed,
-      travelDocuments: totalTravelDocs,
-      results: result.results,
-    });
-  } catch (error: any) {
-    console.error("Error in batch analyze:", error);
-    const formatted = formatGeminiError(error);
-    res.status(500).json(formatted);
-  }
-});
-
 // Vite middleware and static files
 async function startServer() {
-  await initDatabase();
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -627,7 +689,6 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on port ${PORT}`);
-    exec('start http://localhost:3000');
   });
 }
 
