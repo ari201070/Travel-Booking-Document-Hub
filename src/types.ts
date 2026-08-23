@@ -48,6 +48,8 @@ export interface DriveFileItem {
   modifiedTime?: string;
   source?: 'drive' | 'photos';
   baseUrl?: string;
+  photoTitle?: string;
+  capturedDate?: string;
 }
 
 export interface ChatMessage {

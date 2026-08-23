@@ -103,21 +103,32 @@ export default function DriveScanner({
     setSelectedPhotoIds(unanalyzed);
   }, [photoFiles, bookings]);
 
-  // Google Photos: Scan recent photos
+  // Google Photos: Scan recent photos or resolve pasted URL
   const handleScanPhotos = async () => {
     setIsPhotosLoading(true);
     setPhotosError(null);
     try {
+      const trimmed = photosSearchQuery.trim();
+      if (trimmed.includes('photos.app.goo.gl') || trimmed.includes('photos.google.com') || trimmed.includes('googleusercontent.com') || trimmed.includes('drive.google.com')) {
+        const resolvedPhoto = await resolveAndSetPhoto(trimmed);
+        setPhotoFiles(prev => {
+          const exists = prev.some(p => p.baseUrl === resolvedPhoto.baseUrl || p.webViewLink === resolvedPhoto.webViewLink);
+          return exists ? prev : [resolvedPhoto, ...prev];
+        });
+        setHasScannedPhotos(true);
+        return;
+      }
+
       const url = `https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=40`;
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
 
       if (response.status === 403) {
-        throw new Error('Asegúrate de conceder permisos de Google Fotos al iniciar sesión. Por favor, cierra sesión y vuelve a ingresar marcando la casilla de Google Fotos.');
+        throw new Error('No se pudo acceder a la biblioteca privada de Google Fotos mediante la API directa. ¡Pero puedes analizar cualquier foto o álbum compartido de Google Fotos! Pega la URL del enlace compartido en la casilla de búsqueda arriba y presiona Buscar.');
       }
       if (!response.ok) {
-        throw new Error('No se pudo acceder a tu biblioteca de Google Fotos. Verifica tus permisos o vuelve a iniciar sesión.');
+        throw new Error('No se pudo acceder a la biblioteca de Google Fotos. Pega el enlace de tu foto compartida en la casilla de búsqueda para importar tu foto directamente.');
       }
 
       const data = await response.json();
@@ -904,6 +915,32 @@ export default function DriveScanner({
                 </button>
               </form>
             </div>
+
+            {photosSearchQuery.trim().includes('photos.app.goo.gl') || photosSearchQuery.trim().includes('photos.google.com') ? (
+              <motion.div 
+                initial={{ opacity: 0, y: -4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="mt-2.5 p-2 bg-indigo-50/80 border border-indigo-200/60 rounded-xl flex items-center justify-between gap-2"
+              >
+                <div className="flex items-center gap-2 text-xs text-indigo-900 font-medium min-w-0">
+                  <Sparkles className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                  <span className="truncate">Enlace de Google Fotos detectado:</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={(e) => handlePhotosCustomSearch(e)}
+                  disabled={isPhotosLoading}
+                  className="shrink-0 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-[11px] px-3 py-1 rounded-lg shadow-sm transition-colors cursor-pointer flex items-center gap-1"
+                >
+                  {isPhotosLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : null}
+                  <span>Importar Foto</span>
+                </button>
+              </motion.div>
+            ) : (
+              <p className="text-[10px] text-slate-400 mt-1.5 flex items-center gap-1">
+                <span>💡 Pega cualquier enlace compartido de Google Fotos (<code className="bg-slate-100 px-1 py-0.5 rounded text-slate-600 font-mono">https://photos.app.goo.gl/...</code>) para importar tus imágenes sin permisos adicionales.</span>
+              </p>
+            )}
           </div>
 
           {/* Error Alert */}

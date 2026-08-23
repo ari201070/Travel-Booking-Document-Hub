@@ -11,12 +11,14 @@ import BookingCard from './components/BookingCard';
 import Timeline from './components/Timeline';
 import TravelChat from './components/TravelChat';
 import DriveScanner from './components/DriveScanner';
+import MapView from './components/MapView';
 import { 
   Sparkles, 
   LogOut, 
   FolderSync, 
   Compass, 
   MapPin, 
+  Navigation,
   Calendar, 
   DollarSign,
   Briefcase,
@@ -40,7 +42,7 @@ export default function App() {
   const [bookings, setBookings] = useState<TravelBooking[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState<{ [key: string]: boolean }>({});
   const [activeCategory, setActiveCategory] = useState<string>('all');
-  const [activeView, setActiveView] = useState<'all-in-one' | 'itinerary' | 'assistant'>('all-in-one');
+  const [activeView, setActiveView] = useState<'all-in-one' | 'itinerary' | 'assistant' | 'map'>('all-in-one');
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Trips State
@@ -207,7 +209,9 @@ export default function App() {
           mimeType: file.mimeType,
           name: file.name,
           source: file.source,
-          baseUrl: file.baseUrl
+          baseUrl: file.baseUrl,
+          photoTitle: file.photoTitle,
+          capturedDate: file.capturedDate
         })
       });
 
@@ -383,6 +387,24 @@ export default function App() {
         element.classList.remove('ring-2', 'ring-sky-500', 'ring-offset-2');
       }, 2000);
     }
+  };
+
+  const handleUpdateCoordinates = (bookingId: string, coords: { lat: number; lng: number }, locationName?: string) => {
+    setBookings((prev) => {
+      const updated = prev.map((b) => {
+        if (b.id === bookingId) {
+          return {
+            ...b,
+            coordinates: coords,
+            ...(locationName ? { location: locationName } : {})
+          };
+        }
+        return b;
+      });
+      localStorage.setItem('travel_bookings', JSON.stringify(updated));
+      return updated;
+    });
+    showToast('Coordenadas de ubicación actualizadas correctamente.', 'success');
   };
 
   const handleDeleteBooking = (id: string) => {
@@ -943,6 +965,17 @@ export default function App() {
                   <Sparkles className="w-4 h-4 shrink-0" />
                   <span>Asistente de Viaje</span>
                 </button>
+                <button
+                  onClick={() => setActiveView('map')}
+                  className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-xs font-medium text-left transition-all cursor-pointer ${
+                    activeView === 'map'
+                      ? 'bg-slate-900 text-white font-semibold'
+                      : 'text-slate-600 hover:bg-slate-50'
+                  }`}
+                >
+                  <Navigation className="w-4 h-4 shrink-0" />
+                  <span>Mapa de Puntos</span>
+                </button>
               </div>
             </div>
 
@@ -1106,7 +1139,7 @@ export default function App() {
                       : 'text-slate-600'
                   }`}
                 >
-                  Escáner de Drive
+                  Escáner
                 </button>
                 <button
                   onClick={() => setActiveView('assistant')}
@@ -1116,7 +1149,17 @@ export default function App() {
                       : 'text-slate-600'
                   }`}
                 >
-                  Asistente de Viaje
+                  Asistente
+                </button>
+                <button
+                  onClick={() => setActiveView('map')}
+                  className={`flex-1 text-center py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                    activeView === 'map' 
+                      ? 'bg-slate-950 text-white' 
+                      : 'text-slate-600'
+                  }`}
+                >
+                  Mapa 🗺️
                 </button>
               </div>
 
@@ -1204,11 +1247,11 @@ export default function App() {
                 </div>
               </div>
 
-              {/* SPLIT LAYOUT: LEFT SIDE SCANNER/CHAT, RIGHT SIDE TIMELINE & CARDS */}
+              {/* SPLIT LAYOUT: LEFT SIDE SCANNER/CHAT/MAP, RIGHT SIDE TIMELINE & CARDS */}
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start" id="split-layout">
                 
-                {/* LEFT COLUMN: Drive Scanner & Itinerary Assistant Chat */}
-                <div className="xl:col-span-5 space-y-6">
+                {/* LEFT COLUMN: Drive Scanner & Itinerary Assistant Chat & Map View */}
+                <div className={`${activeView === 'map' ? 'xl:col-span-12' : 'xl:col-span-5'} space-y-6`}>
                   {/* View Selector inside desktop main area */}
                   <div className="bg-white border border-slate-200 p-1 rounded-xl hidden md:flex shadow-sm" id="desktop-view-switcher">
                     <button
@@ -1219,7 +1262,7 @@ export default function App() {
                           : 'text-slate-600 hover:text-slate-800'
                       }`}
                     >
-                      Búsqueda y Escáner de Drive
+                      Escáner de Drive
                     </button>
                     <button
                       onClick={() => setActiveView('assistant')}
@@ -1231,9 +1274,20 @@ export default function App() {
                     >
                       Asistente de Viaje
                     </button>
+                    <button
+                      onClick={() => setActiveView('map')}
+                      className={`flex-1 text-center py-2 text-xs font-bold rounded-lg transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+                        activeView === 'map' 
+                          ? 'bg-slate-950 text-white' 
+                          : 'text-slate-600 hover:text-slate-800'
+                      }`}
+                    >
+                      <Navigation className="w-3.5 h-3.5" />
+                      <span>Mapa de Puntos</span>
+                    </button>
                   </div>
 
-                  {/* Render Scanner or Chat dynamically */}
+                  {/* Render Scanner, Chat or Map dynamically */}
                   <div className="transition-all duration-300">
                     {activeView === 'all-in-one' ? (
                       <DriveScanner
@@ -1249,8 +1303,16 @@ export default function App() {
                           }
                         }}
                       />
-                    ) : (
+                    ) : activeView === 'assistant' ? (
                       <TravelChat bookings={bookings} trips={trips} />
+                    ) : (
+                      <MapView
+                        bookings={tripBookings}
+                        trips={trips}
+                        selectedTripId={selectedTripId}
+                        onSelectBooking={(b) => handleScrollToBooking(b.id)}
+                        onUpdateCoordinates={handleUpdateCoordinates}
+                      />
                     )}
                   </div>
                 </div>

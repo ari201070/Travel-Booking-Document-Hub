@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import fs from "fs";
+import exifr from "exifr";
 
 dotenv.config();
 
@@ -189,6 +190,87 @@ function formatGeminiError(error: any): { error: string, details: string, code?:
   };
 }
 
+function parseDateFromTitle(title?: string): string | null {
+  if (!title) return null;
+  // Try matching English dates e.g. Oct 9, 2025 or October 9, 2025
+  const enMatch = title.match(/(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+(\d{1,2}),?\s+(\d{4})/i);
+  if (enMatch) {
+    const months: Record<string, number> = { jan:0, feb:1, mar:2, apr:3, may:4, jun:5, jul:6, aug:7, sep:8, oct:9, nov:10, dec:11 };
+    const m = months[enMatch[1].toLowerCase().substring(0,3)];
+    const d = parseInt(enMatch[2], 10);
+    const y = parseInt(enMatch[3], 10);
+    if (m !== undefined && !isNaN(d) && !isNaN(y)) {
+      const dt = new Date(Date.UTC(y, m, d));
+      return dt.toISOString().split('T')[0];
+    }
+  }
+  // Try matching Spanish dates e.g. 9 de oct. de 2025 or 9 de octubre de 2025
+  const esMatch = title.match(/(\d{1,2})\s+de\s+(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)[a-z.]*\s+de\s+(\d{4})/i);
+  if (esMatch) {
+    const monthsEs: Record<string, number> = { ene:0, feb:1, mar:2, abr:3, may:4, jun:5, jul:6, ago:7, sep:8, oct:9, nov:10, dic:11 };
+    const m = monthsEs[esMatch[2].toLowerCase().substring(0,3)];
+    const d = parseInt(esMatch[1], 10);
+    const y = parseInt(esMatch[3], 10);
+    if (m !== undefined && !isNaN(d) && !isNaN(y)) {
+      const dt = new Date(Date.UTC(y, m, d));
+      return dt.toISOString().split('T')[0];
+    }
+  }
+  return null;
+}
+
+async function extractExifMetadata(buffer: Buffer | null): Promise<{
+  capturedDate?: string;
+  capturedTime?: string;
+  latitude?: number;
+  longitude?: number;
+  summaryText: string;
+}> {
+  let summaryText = "";
+  let capturedDate: string | undefined;
+  let capturedTime: string | undefined;
+  let latitude: number | undefined;
+  let longitude: number | undefined;
+
+  if (!buffer) return { summaryText };
+
+  try {
+    const parsed = await exifr.parse(buffer, {
+      tiff: true,
+      exif: true,
+      gps: true,
+      reviveValues: true,
+    });
+
+    if (parsed) {
+      const d = parsed.DateTimeOriginal || parsed.CreateDate || parsed.ModifyDate;
+      if (d) {
+        const dt = new Date(d);
+        if (!isNaN(dt.getTime())) {
+          const year = dt.getFullYear();
+          const month = String(dt.getMonth() + 1).padStart(2, '0');
+          const day = String(dt.getDate()).padStart(2, '0');
+          const hours = String(dt.getHours()).padStart(2, '0');
+          const mins = String(dt.getMinutes()).padStart(2, '0');
+          capturedDate = `${year}-${month}-${day}`;
+          capturedTime = `${hours}:${mins}`;
+          summaryText += `\n[METADATOS EXIF DE LA FOTO] Fecha y Hora de Captura: ${capturedDate} a las ${capturedTime} (${dt.toISOString()})`;
+        }
+      }
+
+      if (typeof parsed.latitude === 'number' && typeof parsed.longitude === 'number') {
+        latitude = parsed.latitude;
+        longitude = parsed.longitude;
+        summaryText += `\n[COORDENADAS GPS EXIF DE LA IMAGEN] Latitud: ${latitude}, Longitud: ${longitude}`;
+      }
+    }
+  } catch (err) {
+    // Ignore non-EXIF or non-JPEG files
+  }
+
+  return { capturedDate, capturedTime, latitude, longitude, summaryText };
+}
+
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
@@ -251,16 +333,28 @@ app.post("/api/resolve-photo-link", async (req, res) => {
       }
     }
 
-    console.log(`Successfully resolved to direct image URL: ${directUrl}`);
+    // Look for og:title meta tag to extract date/title if provided by Google Photos
+    const ogTitleMatch = html.match(/<meta\s+property=["']og:title["']\s+content=["']([^"']+)["']/i) ||
+                         html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:title["']/i);
+    const photoTitle = ogTitleMatch ? ogTitleMatch[1] : "";
+    const parsedCapturedDate = parseDateFromTitle(photoTitle);
+
+    console.log(`Successfully resolved direct image URL: ${directUrl}. Title: "${photoTitle}", Date: ${parsedCapturedDate}`);
+
+    const displayName = photoTitle 
+      ? `Foto (${photoTitle.replace(/📸/g, '').trim()}).jpg` 
+      : 'Foto de Viaje Compartida.jpg';
 
     return res.json({
       id: 'photo-resolved-' + Math.random().toString(36).substring(2, 11),
-      name: 'Foto de Viaje Compartida.jpg',
+      name: displayName,
       mimeType: 'image/jpeg',
       webViewLink: link,
       iconLink: directUrl,
       source: 'photos',
-      baseUrl: directUrl
+      baseUrl: directUrl,
+      photoTitle: photoTitle,
+      capturedDate: parsedCapturedDate || undefined
     });
 
   } catch (err: any) {
@@ -278,7 +372,7 @@ app.post("/api/analyze-doc", async (req, res) => {
     }
     const token = authHeader.split(' ')[1];
 
-    const { fileId, mimeType, name, source, baseUrl } = req.body;
+    const { fileId, mimeType, name, source, baseUrl, photoTitle, capturedDate } = req.body;
     if (!fileId || !mimeType || !name) {
       return res.status(400).json({ error: "Missing required fields: fileId, mimeType, name" });
     }
@@ -353,11 +447,31 @@ app.post("/api/analyze-doc", async (req, res) => {
       // We will still proceed to Gemini with filename metadata as fallback
     }
 
+    // Extract EXIF metadata if image buffer is available
+    const exifMeta = await extractExifMetadata(fileBuffer);
+    const effectiveDate = capturedDate || exifMeta.capturedDate || parseDateFromTitle(photoTitle || '') || parseDateFromTitle(name || '');
+    const effectiveTime = exifMeta.capturedTime;
+
     // Build the parts for Gemini
     const contents: any[] = [];
     const mimeTypeForGemini = source === 'photos' ? 'image/jpeg' : mimeType;
     let prompt = `Analiza este documento para determinar si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (incluyendo facturas de lavandería, supermercados, tiendas, peajes, restaurantes, compras generales, etc), y extrae toda la información estructurada relevante. Absolutamente cualquier ticket o recibo de compra se considera un gasto de viaje.
 Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
+
+    if (photoTitle) {
+      prompt += `\n[TÍTULO Y METADATOS DE GOOGLE FOTOS]: "${photoTitle}"`;
+    }
+    if (exifMeta.summaryText) {
+      prompt += exifMeta.summaryText;
+    }
+    if (effectiveDate) {
+      prompt += `\n[FECHA REGISTRADA DE CAPTURA DE FOTO/METADATOS]: ${effectiveDate}${effectiveTime ? ` ${effectiveTime}` : ''}`;
+    }
+
+    prompt += `\n\n¡REGLAS CRÍTICAS Y OBLIGATORIAS PARA LA FECHA ('startDate')!:
+1. Si en el texto o comprobante impreso del ticket/factura/recibo aparece una fecha explícita de emisión, compra o servicio escrito, UTILIZA esa fecha como 'startDate'.
+2. Si el ticket/recibo/comprobante/foto NO especifica explícitamente una fecha en el papel o la imagen, UTILIZA OBLIGATORIAMENTE la fecha de captura de la foto / metadatos de Google Fotos / EXIF proporcionada arriba${effectiveDate ? ` (${effectiveDate})` : ''} como 'startDate'.
+3. ¡NUNCA devuelvas 'Sin fecha', nulo o vacío para 'startDate' cuando haya fecha en el papel O si se te proporciona la fecha de captura/EXIF/Google Fotos!`;
 
     if (fileBuffer) {
       const supportedBinaryTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
@@ -388,7 +502,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
       contents,
       config: {
         responseMimeType: "application/json",
-                responseSchema: {
+        responseSchema: {
           type: Type.OBJECT,
           properties: {
             isTravelDocument: {
@@ -409,7 +523,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeTypeForGemini}".`;
             },
             startDate: {
               type: Type.STRING,
-              description: "Fecha de check-in, partida, inicio, o retiro (formato YYYY-MM-DD)."
+              description: "Fecha de la reserva, compra, factura, ticket o servicio (formato YYYY-MM-DD). Si el ticket no muestra fecha escrita, DEBES usar la fecha de captura EXIF o metadatos de Google Fotos de la imagen provista. NUNCA devuelvas 'Sin fecha' o vacío si hay metadatos o fecha en el ticket."
             },
             startTime: {
               type: Type.STRING,
@@ -496,9 +610,32 @@ app.post("/api/analyze-local", async (req, res) => {
 
     console.log(`Analyzing local file: "${name}" (${mimeType})`);
 
+    let fileBuffer: Buffer | null = null;
+    try {
+      fileBuffer = Buffer.from(base64Data, 'base64');
+    } catch (e) {
+      console.warn("Failed to convert base64Data to buffer:", e);
+    }
+
+    const exifMeta = await extractExifMetadata(fileBuffer);
+    const effectiveDate = exifMeta.capturedDate || parseDateFromTitle(name || '');
+    const effectiveTime = exifMeta.capturedTime;
+
     const contents: any[] = [];
     let prompt = `Analiza este documento para determinar si contiene una reserva de viaje o CUALQUIER TIPO DE GASTO O RECIBO (incluyendo facturas de lavandería, supermercados, tiendas, peajes, restaurantes, compras generales, etc), y extrae toda la información estructurada relevante. Absolutamente cualquier ticket o recibo de compra se considera un gasto de viaje.
 Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
+
+    if (exifMeta.summaryText) {
+      prompt += exifMeta.summaryText;
+    }
+    if (effectiveDate) {
+      prompt += `\n[FECHA REGISTRADA DE CAPTURA EXIF/METADATOS]: ${effectiveDate}${effectiveTime ? ` ${effectiveTime}` : ''}`;
+    }
+
+    prompt += `\n\n¡REGLAS CRÍTICAS Y OBLIGATORIAS PARA LA FECHA ('startDate')!:
+1. Si en el texto o comprobante impreso del ticket/factura/recibo aparece una fecha explícita de emisión, compra o servicio escrito, UTILIZA esa fecha como 'startDate'.
+2. Si el ticket/recibo/comprobante/foto NO especifica explícitamente una fecha en el papel o la imagen, UTILIZA OBLIGATORIAMENTE la fecha de captura de la foto / metadatos EXIF proporcionada arriba${effectiveDate ? ` (${effectiveDate})` : ''} como 'startDate'.
+3. ¡NUNCA devuelvas 'Sin fecha', nulo o vacío para 'startDate' cuando haya fecha en el papel O si se te proporciona la fecha de captura/EXIF!`;
 
     const supportedBinaryTypes = ['application/pdf', 'image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
     if (supportedBinaryTypes.includes(mimeType)) {
@@ -512,7 +649,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
     } else {
       // Decode base64 to text string
       try {
-        const textContent = Buffer.from(base64Data, 'base64').toString('utf-8').slice(0, 12000);
+        const textContent = (fileBuffer || Buffer.from(base64Data, 'base64')).toString('utf-8').slice(0, 12000);
         prompt += `\nContenido de texto extraído del archivo original:\n${textContent}`;
       } catch (decodeErr) {
         prompt += `\nNota: No se pudo decodificar el contenido de texto. Por favor, infiere si es un documento de viaje y clasifícalo en base a su nombre descriptivo "${name}".`;
@@ -527,7 +664,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
       contents,
       config: {
         responseMimeType: "application/json",
-                responseSchema: {
+        responseSchema: {
           type: Type.OBJECT,
           properties: {
             isTravelDocument: {
@@ -548,7 +685,7 @@ Documento original: Nombre: "${name}", MimeType: "${mimeType}".`;
             },
             startDate: {
               type: Type.STRING,
-              description: "Fecha de check-in, partida, inicio, o retiro (formato YYYY-MM-DD)."
+              description: "Fecha de la reserva, compra, factura, ticket o servicio (formato YYYY-MM-DD). Si el ticket no muestra fecha escrita, DEBES usar la fecha de captura EXIF o metadatos de la imagen provista. NUNCA devuelvas 'Sin fecha' o vacío si hay metadatos o fecha en el ticket."
             },
             startTime: {
               type: Type.STRING,
